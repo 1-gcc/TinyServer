@@ -1,2 +1,2 @@
 TinyServer: TinyServer.cpp
-	g++ TinyServer.cpp -pthread -o TinyServer
+	g++ TinyServer.cpp Logger.cpp -pthread -o TinyServer -ldl

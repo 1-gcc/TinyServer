@@ -30,8 +30,14 @@
 *.exe
 *.out
 *.app
+*.so
+*.so.*
 TinyServer
 
 # Test Files
 *.bin
+*.trc
+*.log
+
+logger
 

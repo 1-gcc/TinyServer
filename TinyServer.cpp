@@ -11,9 +11,14 @@
 #include <sys/errno.h>
 #include <sys/types.h>
 #include <pthread.h>
+#include <map>
+
+#include "Logger.h"
 
 #define SOCKET int
 #define SOCK_ERROR -1
+
+Logger log;
 
 class Opt
 {
@@ -21,17 +26,64 @@ public:
 
 } ;
 
+class ThreadInfo;
+
+typedef std::map<pthread_t,ThreadInfo*> ThreadMap;
+
 class ThreadInfo
 {
 public:
 	SOCKET acc;
 	pthread_t threadId;
 	int threadNr;
+	ThreadMap * threadMap;
+	ThreadInfo(ThreadMap*p,SOCKET acc,int nr)
+	{
+		this->acc = acc;
+		threadMap = p;
+		threadNr = nr;
+	}
 } ;
+
+void * threadFun(void * p);
+
+class Thread {
+public:
+
+	pthread_t myPthread;
+	bool suspended;
+	pthread_mutex_t m_SuspendMutex;
+	pthread_cond_t m_ResumeCond;
+
+	void start() {
+		suspended = false;
+		pthread_create(&myPthread, NULL, threadFun, (void*)this );
+	}
+
+	Thread() { }
+
+	void suspendMe() {
+		pthread_mutex_lock(&m_SuspendMutex);
+		suspended = true;
+		do {
+			pthread_cond_wait(&m_ResumeCond, &m_SuspendMutex);
+		} while (suspended);
+		pthread_mutex_unlock(&m_SuspendMutex);
+	}
+
+	void resume() {
+		pthread_mutex_lock(&m_SuspendMutex);
+		suspended = false;
+		pthread_cond_signal(&m_ResumeCond);
+		pthread_mutex_unlock(&m_SuspendMutex);
+	}
+};
+
 
 void * threadFun(void * p)
 {
-	SOCKET acc = ((ThreadInfo*)p)->acc;
+	ThreadInfo * _this = (ThreadInfo*)p;
+	SOCKET acc = _this->acc;
 	for(;;)
 	{
 		char buffer[ 1024 ] ;
@@ -49,9 +101,22 @@ void * threadFun(void * p)
 		{
 			fwrite(buffer,1,ret,fp) ;
 			fclose(fp) ;
-	}
-	char * resp = "HTTP/1.0\r\nContent-Type: text/html\r\n\r\n<html><body><h1>Data</h1></body></html>\r\n\r\n";
+		}
+		char intbuf[ 512 ];
+		char resp[] = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n"
+							"Content-Length: ";
+		char conn[] = "Connection: close\r\n";
+		char resp_end[] = "\r\n\r\n\n";
+		char line_end[] = "\r\n";
+		char content[] = "<html><body><h1>Data</h1></body></html>";
+		sprintf(intbuf,"%d",(int)strlen(content));
 		write(acc,resp,strlen(resp)) ;
+		write(acc,intbuf,strlen(intbuf));
+		write(acc,line_end,strlen(line_end));
+		write(acc,conn,strlen(conn));
+		write(acc,resp_end,strlen(resp_end));
+		write(acc,content,strlen(content));
+
 		break;
 	}
 	close(acc);
@@ -65,7 +130,7 @@ int server(unsigned short port,Opt&opt)
 	memset(&addr,0,sizeof(addr));
 	memset(&client_addr,0,sizeof(client_addr));
 	
-	SOCKET sock = socket(AF_INET6,SOCK_STREAM,0);
+	SOCKET sock = socket(AF_INET6,SOCK_STREAM,IPPROTO_TCP);
 	if(sock == SOCK_ERROR)
 	{
 		fprintf(stderr,"socket error\n");
@@ -88,6 +153,8 @@ int server(unsigned short port,Opt&opt)
 		exit(2);
 	}
 	listen(sock,4);
+	ThreadMap * threadMap = new ThreadMap;
+
 	for(;;)
 	{
 		{
@@ -97,7 +164,8 @@ int server(unsigned short port,Opt&opt)
 				buffer,sizeof(buffer) - 1),
 				ntohs(addr.sin6_port));
 		}
-		ThreadInfo * info = new ThreadInfo;
+
+		ThreadInfo * info = NULL;
 
 		SOCKET acc = accept(sock,
 				(struct sockaddr*)&client_addr,
@@ -117,8 +185,8 @@ int server(unsigned short port,Opt&opt)
 			strftime( buffer2 , sizeof(buffer2) ,
 					"%Y%m%d %H%M%S",tbuf);
 			char buffer[ 1024 ] ;
-			printf("%s:incoming connect from <%s> Port %d\n",
-				buffer2,
+			log.trace("%s%02d:incoming connect from <%s> Port %d\n",
+				buffer2,(timer%1000)/10,
 				inet_ntop(AF_INET6,&client_addr.sin6_addr,
 				buffer,sizeof(buffer) - 1),
 				ntohs(client_addr.sin6_port));
@@ -137,9 +205,12 @@ int server(unsigned short port,Opt&opt)
 		
 		pthread_attr_t attr;
 		pthread_attr_init(&attr);
-		info->acc = acc;
+		pthread_attr_setstacksize(&attr,256*1024);
+		info = new ThreadInfo(threadMap,acc,0);
 		int ret = pthread_create(&info->threadId, &attr,
                           threadFun,(void*)info);
+		threadMap->insert(std::make_pair(info->threadId,info));
+		pthread_attr_destroy(&attr);
 
 		
 		
@@ -147,6 +218,8 @@ int server(unsigned short port,Opt&opt)
 }
 int main(int argc,char**argv)
 {
+	log.load();
+	
 	int port = 80;
 	Opt opt ;
 	while(--argc)
